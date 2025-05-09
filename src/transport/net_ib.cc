@@ -12,6 +12,9 @@
 #include "graph.h"
 #include "utils.h"
 #include "param.h"
+// Backport (5f6805b4 onto 2.22.3): for pfn_hsa_amd_portable_export_dmabuf /
+// hsa_status_t used by the dmabuf registration of the GDR flush buffer.
+#include "rocmwrap.h"
 
 #include <assert.h>
 #include <pthread.h>
@@ -696,6 +699,10 @@ ncclResult_t ncclIbGdrSupport() {
   return ncclSuccess;
 }
 
+// Conflict resolution (5f6805b4 onto 2.22.3): the incoming per-device
+// ibDmaBufSupportInitOnce helper belongs to 2.27's refactored probe and uses
+// struct fields 2.22.3 does not have; 2.22.3's existing ncclIbDmaBufSupport
+// below already performs this detection, so the helper is dropped.
 // Detect whether DMA-BUF support is present in the kernel
 // Returns :
 // ncclSuccess : DMA-BUF support is available
@@ -951,6 +958,7 @@ struct ncclIbGpuFlush {
   int* gpuFlushGpuMem;
   struct ibv_sge sge;
   struct ncclIbQp qp;
+  int dmabuf_fd;
 };
 
 struct ncclIbRemFifo {
@@ -1374,6 +1382,7 @@ ib_recv:
   struct ncclIbRecvCommDev* rCommDev;
   struct ncclIbDevInfo* remDevInfo;
   struct ncclIbQp* qp;
+  bool useDmaBuf; 
 
   mergedDev = ncclIbMergedDevs + lComm->dev;
   rComm->base.ndevs = mergedDev->ndevs;
@@ -1438,9 +1447,12 @@ ib_recv:
     NCCLCHECK(ncclIbRtsQp(qp->qp));
   }
 
-  rComm->flushEnabled = ((ncclIbGdrSupport() == ncclSuccess || ncclIbDmaBufSupport(lComm->dev) == ncclSuccess)
+  useDmaBuf  = (ncclIbDmaBufSupport(lComm->dev) == ncclSuccess);
+  rComm->flushEnabled = ((ncclIbGdrSupport() == ncclSuccess || useDmaBuf)
                             && (ncclParamIbGdrFlushDisable() == 0)) ? 1 : 0;
 
+  // Conflict resolution: keep 2.22.3's device-loop bound (mergedDev->ndevs);
+  // rComm->base.vProps is a 2.27-era structure.
   for (int i = 0; i < mergedDev->ndevs; i++) {
     rCommDev = rComm->devs + i;
     ibDevN = rCommDev->base.ibDevN;
@@ -1461,10 +1473,32 @@ ib_recv:
 #else
         NCCLCHECK(ncclCudaCalloc(&rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), nullptr, hipDeviceMallocFinegrained));
 #endif
-        NCCLCHECK(wrap_ibv_reg_mr(&rCommDev->gpuFlush.gpuMr, rCommDev->base.pd, rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE|IBV_ACCESS_REMOTE_WRITE|IBV_ACCESS_REMOTE_READ));
+        // Conflict resolution: 2.22.3's ncclIbAccept has no ret/fail: cleanup
+        // convention, so the incoming NCCLCHECKGOTO/goto fail are converted to
+        // plain NCCLCHECK / error return.
+        if (useDmaBuf)
+        {
+          uint64_t export_offset = 0;
+          void *aligned_ptr = NULL;
+          size_t aligned_size = 0;
+          get_aligned_ptr_and_size(rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int) /*devicebuffersize*/, &aligned_ptr, &aligned_size);
+          hsa_status_t export_status = pfn_hsa_amd_portable_export_dmabuf(aligned_ptr, aligned_size, &rCommDev->gpuFlush.dmabuf_fd, &export_offset);
+          if (rCommDev->gpuFlush.dmabuf_fd < 0 || export_status != HSA_STATUS_SUCCESS)
+          {
+            WARN("Failed to export DMA BUF");
+            return ncclSystemError;
+          }
+          NCCLCHECK(wrap_ibv_reg_dmabuf_mr(&rCommDev->gpuFlush.gpuMr, rCommDev->base.pd, export_offset, sizeof(int), (uint64_t)rCommDev->gpuFlush.gpuFlushGpuMem /*iova*/, rCommDev->gpuFlush.dmabuf_fd, IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ));
+        }
+        else
+        {
+          rCommDev->gpuFlush.dmabuf_fd = -1;
+          NCCLCHECK(wrap_ibv_reg_mr(&rCommDev->gpuFlush.gpuMr, rCommDev->base.pd, rCommDev->gpuFlush.gpuFlushGpuMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE | IBV_ACCESS_REMOTE_WRITE | IBV_ACCESS_REMOTE_READ));
+        }
       } else {
         rCommDev->gpuFlush.gpuFlushGpuMem = nullptr;
         rCommDev->gpuFlush.gpuMr = nullptr;
+        rCommDev->gpuFlush.dmabuf_fd = -1;
       }
       NCCLCHECK(wrap_ibv_reg_mr(&rCommDev->gpuFlush.hostMr, rCommDev->base.pd, &rComm->gpuFlushHostMem, sizeof(int), IBV_ACCESS_LOCAL_WRITE));
       rCommDev->gpuFlush.sge.addr = (uint64_t)&rComm->gpuFlushHostMem;
@@ -2183,6 +2217,7 @@ ncclResult_t ncclIbCloseRecv(void* recvComm) {
           commDev->gpuFlush.gpuFlushGpuMem = nullptr;
           if (commDev->gpuFlush.gpuMr != nullptr) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.gpuMr));
           commDev->gpuFlush.gpuMr = nullptr;
+          if(commDev->gpuFlush.dmabuf_fd > 0) { close(commDev->gpuFlush.dmabuf_fd);}
         }
         if (commDev->gpuFlush.qp.qp != NULL) NCCLCHECK(wrap_ibv_destroy_qp(commDev->gpuFlush.qp.qp));
         if (commDev->gpuFlush.hostMr != NULL) NCCLCHECK(wrap_ibv_dereg_mr(commDev->gpuFlush.hostMr));
