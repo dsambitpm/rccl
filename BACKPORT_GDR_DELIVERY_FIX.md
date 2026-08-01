@@ -93,6 +93,32 @@ This commit:
 - Tracks the fd in `ncclIbGpuFlush::dmabuf_fd` and closes it in
   `ncclIbCloseRecv()` alongside buffer free and MR deregistration.
 
+## Why a backport instead of upgrading RCCL
+
+The fix landed upstream in the RCCL 2.27 line, but production on this cluster
+is qualified on ROCm 6.4.4, whose stock RCCL is 2.22.3. The upgrade paths that
+would pick up the fix "for free" were each evaluated and failed qualification
+here:
+
+- **ROCm 7.14 (stock RCCL 2.30.4):** crashes at init for internode GDR setups
+  on this fabric.
+- **Upstream `develop` built against ROCm 7.14:** did not build successfully.
+- **RCCL 2.27.7 source-built against ROCm 6.4.4:** passed the synthetic
+  reproducer, but the production application's first Rayleigh-Ritz eigensolve
+  (async compute+communicate overlap) hung under it. That deadlock attribution
+  was later **retracted**: the hang was traced to a single bad node — a stock
+  2.22.3 control hung identically on the same node pair (see the caveat under
+  Validation). So 2.27.7 is not proven bad, but it is not requalified either
+  (retest pending), and its receive-path/proxy rework is a far larger delta
+  than can be validated quickly.
+
+Against that, the backport is the minimal, auditable change: two isolated
+commits (~120 lines, confined to the IB transport flush path) on top of the
+exact production-qualified base, so everything else in the stack — kernels,
+proxy, tuning — stays bit-identical to what months of production runs have
+validated. Bandwidth and correctness were then re-validated directly on this
+branch (see Validation below).
+
 ## Validation (op2 cluster: MI300X 2 nodes x 8 GPUs, rail-aligned 8x400G IB, ROCm 6.4.4, GDR on)
 
 Reference ground-state free energy: -5.642062658722e+04 Ha; acceptance
