@@ -2,6 +2,14 @@
 
 ROCm Communication Collectives Library
 
+> [!IMPORTANT]
+> **This fork carries a GDR delivery-fix backport.** This branch is stock RCCL
+> 2.22.3 (ROCm 6.4.4) plus two cherry-picked upstream commits that fix silent
+> data corruption in GPU-direct-RDMA receives on multi-node MI300X under
+> concurrent HBM-heavy compute. What the fix does, why, and how it was
+> validated: **[BACKPORT_GDR_DELIVERY_FIX.md](BACKPORT_GDR_DELIVERY_FIX.md)**.
+> The rest of this README is the unmodified stock RCCL documentation.
+
 > **Note:** The published documentation is available at [RCCL](https://rocm.docs.amd.com/projects/rccl/en/latest/index.html) in an organized easy-to-read format that includes a table of contents and search functionality. The documentation source files reside in the [rccl/docs](https://github.com/ROCm/rccl/tree/develop/docs) folder in this repository. As with all ROCm projects, the documentation is open source. For more information, see [Contribute to ROCm documentation](https://rocm.docs.amd.com/en/latest/contribute/contributing.html).
 
 ## Introduction
