@@ -119,6 +119,25 @@ proxy, tuning — stays bit-identical to what months of production runs have
 validated. Bandwidth and correctness were then re-validated directly on this
 branch (see Validation below).
 
+## Measured bandwidth and correctness (synthetic, op2 cluster)
+
+rccl-tests bus bandwidth at 1 GiB message size plus compute-mule reproducer
+status, all on the same shape: MI300X, 2 nodes x 8 GPUs (16 ranks,
+1 rank/GPU), rail-aligned 8x400G IB, ROCm 6.4.4. These are library-level
+measurements only; application-level validation is in the next section.
+
+| config | `all_reduce` busbw @1 GiB | `sendrecv` @1 GiB | mule reproducer |
+|---|---|---|---|
+| stock 2.22.3, GDR on | 352 GB/s in-place / 351 out-of-place | 22.5 GB/s | **CORRUPTS** (onset iter ~350-850, 8704 stale doubles/event) |
+| stock 2.22.3, `NCCL_NET_GDR_LEVEL=LOC` workaround | 57 GB/s (**-84%**) | 10.4 GB/s (**-54%**) | not run (receives staged through host, bypassing the GDR fault path) |
+| **this branch** (backport), GDR on | **351.76 GB/s (-0.1%)** | **22.48 GB/s (-0.1%)** | **CLEAN** (0 corrupt elements over 1000 iters) |
+
+The workaround is correctness-safe but collapses large-message bandwidth; the
+backport keeps full GDR bandwidth (RO=0 flush cost is below measurement noise)
+with the corruption gone. For reference, the highest all_reduce busbw recorded
+for stock 2.22.3 GDR-on at this shape on an idle pair was 354 GB/s; run-to-run
+variance on a busy fabric exceeds the 0.1% delta measured here.
+
 ## Validation (op2 cluster: MI300X 2 nodes x 8 GPUs, rail-aligned 8x400G IB, ROCm 6.4.4, GDR on)
 
 Reference ground-state free energy: -5.642062658722e+04 Ha; acceptance
